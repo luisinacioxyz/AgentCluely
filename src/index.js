@@ -2,14 +2,16 @@ if (require('electron-squirrel-startup')) {
     process.exit(0);
 }
 
-const { app, BrowserWindow, desktopCapturer, globalShortcut, session, ipcMain, shell, screen } = require('electron');
+const { app, BrowserWindow, desktopCapturer, globalShortcut, session, ipcMain, shell, screen, dialog } = require('electron'); // Added dialog
 const path = require('node:path');
-const fs = require('node:fs');
+const fs = require('node:fs').promises; // Use promises version of fs
+const fsSync = require('node:fs'); // For sync operations if needed, like ensureDataDirectories
 const { GoogleGenAI } = require('@google/genai');
 const os = require('os');
 const { spawn } = require('child_process');
 const { pcmToWav, analyzeAudioBuffer, saveDebugAudio } = require('./audioUtils');
 const { getSystemPrompt } = require('./utils/prompts');
+const { whisper } = require('whisper-node'); // Import whisper
 
 let geminiSession = null;
 let loopbackProc = null;
@@ -24,14 +26,16 @@ function ensureDataDirectories() {
     const dataDir = path.join(cheddarDir, 'data');
     const imageDir = path.join(dataDir, 'image');
     const audioDir = path.join(dataDir, 'audio');
+    const tempDir = path.join(dataDir, 'temp');
+    const ffmpegTempDir = path.join(tempDir, 'ffmpeg_temp'); // Subdirectory for FFmpeg temp files
 
-    [cheddarDir, dataDir, imageDir, audioDir].forEach(dir => {
-        if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
+    [cheddarDir, dataDir, imageDir, audioDir, tempDir, ffmpegTempDir].forEach(dir => {
+        if (!fsSync.existsSync(dir)) {
+            fsSync.mkdirSync(dir, { recursive: true });
         }
     });
 
-    return { imageDir, audioDir };
+    return { imageDir, audioDir, tempDir, ffmpegTempDir };
 }
 
 function createWindow() {
@@ -369,6 +373,159 @@ ipcMain.handle('send-audio-content', async (event, { data, mimeType }) => {
     } catch (error) {
         console.error('Error sending audio:', error);
         return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('export-transcription-txt', async (event, textContent) => {
+    if (textContent === null || typeof textContent === 'undefined') {
+        return { success: false, error: 'No text content provided for export.' };
+    }
+
+    const focusedWindow = BrowserWindow.getFocusedWindow();
+    if (!focusedWindow) {
+        // This might happen if the main window loses focus right before the call
+        // Or if it's called when no windows are focused. Fallback to any window or handle error.
+        console.warn('No focused window to show save dialog. Using any available window or potentially failing.');
+        // Potentially: const allWindows = BrowserWindow.getAllWindows(); if (allWindows.length > 0) focusedWindow = allWindows[0];
+        // For now, let's proceed, dialog might handle it or error out.
+    }
+
+    try {
+        const { canceled, filePath } = await dialog.showSaveDialog(focusedWindow, {
+            title: 'Export Transcription',
+            defaultPath: 'transcription.txt',
+            filters: [{ name: 'Text Files', extensions: ['txt'] }]
+        });
+
+        if (canceled || !filePath) {
+            console.log('Export canceled by user.');
+            return { success: false, message: 'Export canceled' };
+        }
+
+        await fs.writeFile(filePath, textContent, 'utf8');
+        console.log(`Transcription exported successfully to: ${filePath}`);
+        return { success: true, message: 'Export successful', filePath };
+
+    } catch (error) {
+        console.error('Error exporting transcription:', error);
+        return { success: false, error: error.message || 'Unknown error during export' };
+    }
+});
+
+// Whisper integration
+// Define model path - adjust based on packaging and whisper-node expectations
+const modelsDir = app.isPackaged
+  ? path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'whisper-node', 'lib', 'whisper.cpp', 'models')
+  : path.join(app.getAppPath(), 'node_modules', 'whisper-node', 'lib', 'whisper.cpp', 'models');
+const modelName = 'ggml-base.en.bin'; // Or other model like 'ggml-tiny.en.bin'
+const fullModelPath = path.join(modelsDir, modelName);
+
+ipcMain.handle('transcribe-audio', async (event, audioDataUri) => {
+    if (!audioDataUri) {
+        return { success: false, error: 'No audio data provided.' };
+    }
+
+    let tempInputPath = '';
+    let tempOutputPath = '';
+    try {
+        const base64Data = audioDataUri.split(',')[1];
+        if (!base64Data) {
+            return { success: false, error: 'Invalid audio data URI format.' };
+        }
+        const audioBuffer = Buffer.from(base64Data, 'base64');
+
+        const { ffmpegTempDir } = ensureDataDirectories();
+        const timestamp = Date.now();
+        tempInputPath = path.join(ffmpegTempDir, `ffmpeg_input_${timestamp}.webm`); // Assuming webm, adjust if needed
+        tempOutputPath = path.join(ffmpegTempDir, `ffmpeg_output_${timestamp}.wav`);
+
+        await fs.writeFile(tempInputPath, audioBuffer);
+        console.log(`Temporary input audio file saved: ${tempInputPath}`);
+
+        const ffmpegArgs = [
+            '-i', tempInputPath,
+            '-ar', '16000',
+            '-ac', '1',
+            '-c:a', 'pcm_s16le',
+            '-y',
+            tempOutputPath
+        ];
+
+        console.log(`Spawning FFmpeg with args: ${ffmpegArgs.join(' ')}`);
+        const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
+
+        let ffmpegStderr = '';
+        ffmpegProcess.stderr.on('data', (data) => {
+            ffmpegStderr += data.toString();
+        });
+
+        await new Promise((resolve, reject) => {
+            ffmpegProcess.on('close', (code) => {
+                if (code === 0) {
+                    console.log('FFmpeg conversion successful.');
+                    resolve();
+                } else {
+                    console.error(`FFmpeg stderr: ${ffmpegStderr}`);
+                    reject(new Error(`FFmpeg exited with code ${code}.Stderr: ${ffmpegStderr}`));
+                }
+            });
+            ffmpegProcess.on('error', (err) => {
+                console.error('Failed to start FFmpeg process.', err);
+                reject(err); // Handle errors like ffmpeg not found
+            });
+        });
+
+        console.log(`Attempting to transcribe using model: ${fullModelPath} with converted file: ${tempOutputPath}`);
+        if (!fsSync.existsSync(fullModelPath)) {
+            console.error(`Model file not found at: ${fullModelPath}.`);
+            return { success: false, error: `Model file not found: ${modelName}. Please download it.` };
+        }
+
+        const options = {
+            modelName: 'base.en',
+            modelPath: fullModelPath,
+            whisperOptions: { language: 'en' }
+        };
+
+        const transcriptionResult = await whisper(tempOutputPath, options); // Use FFmpeg output path
+        console.log('Transcription result:', transcriptionResult);
+
+        // The result format from whisper-node is typically an array of objects
+        // e.g., [{ start: '0:00.123', end: '0:02.456', speech: 'Hello world' }, ...]
+        // We need to concatenate the 'speech' parts.
+        let transcribedText = '';
+        if (Array.isArray(transcriptionResult)) {
+            transcribedText = transcriptionResult.map(segment => segment.speech).join(' ').trim();
+        } else if (typeof transcriptionResult === 'string') { // Fallback if it's just a string
+            transcribedText = transcriptionResult.trim();
+        } else {
+            console.warn('Unexpected transcription result format:', transcriptionResult);
+            transcribedText = '[Transcription produced an unexpected format]';
+        }
+
+        return { success: true, transcription: transcribedText };
+
+    } catch (error) {
+        console.error('Error during transcription:', error);
+        return { success: false, error: error.message || 'Unknown transcription error' };
+    } finally {
+        // Clean up temporary files
+        if (tempInputPath) {
+            try {
+                await fs.unlink(tempInputPath);
+                console.log(`Temporary input audio file deleted: ${tempInputPath}`);
+            } catch (cleanupError) {
+                console.error('Error deleting temporary input audio file:', cleanupError);
+            }
+        }
+        if (tempOutputPath) {
+            try {
+                await fs.unlink(tempOutputPath);
+                console.log(`Temporary output audio file deleted: ${tempOutputPath}`);
+            } catch (cleanupError) {
+                console.error('Error deleting temporary output audio file:', cleanupError);
+            }
+        }
     }
 });
 

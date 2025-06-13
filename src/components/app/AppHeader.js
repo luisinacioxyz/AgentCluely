@@ -73,8 +73,11 @@ export class AppHeader extends LitElement {
         currentView: { type: String },
         statusText: { type: String },
         startTime: { type: Number },
+        isTranscribing: { type: Boolean }, // Added isTranscribing state
         onCustomizeClick: { type: Function },
         onHelpClick: { type: Function },
+        onTranscriptionViewClick: { type: Function },
+        onGlobalStopTranscriptionRequest: { type: Function }, // Added global stop handler
         onCloseClick: { type: Function },
         onHideToggleClick: { type: Function }
     };
@@ -84,8 +87,11 @@ export class AppHeader extends LitElement {
         this.currentView = 'main';
         this.statusText = '';
         this.startTime = null;
+        this.isTranscribing = false; // Initialize isTranscribing
         this.onCustomizeClick = () => {};
         this.onHelpClick = () => {};
+        this.onTranscriptionViewClick = () => {};
+        this.onGlobalStopTranscriptionRequest = () => {}; // Initialize global stop handler
         this.onCloseClick = () => {};
         this.onHideToggleClick = () => {};
     }
@@ -96,6 +102,7 @@ export class AppHeader extends LitElement {
             customize: 'Customize',
             help: 'Help & Shortcuts',
             assistant: 'Cheating Daddy',
+            transcription: 'Live Transcription', // Added title for new view
         };
         return titles[this.currentView] || 'Cheating Daddy';
     }
@@ -108,12 +115,21 @@ export class AppHeader extends LitElement {
         return '';
     }
 
+    _handleGlobalStopClick() {
+        if (this.onGlobalStopTranscriptionRequest) {
+            this.onGlobalStopTranscriptionRequest();
+        }
+    }
+
     render() {
         const elapsedTime = this.getElapsedTime();
 
         return html`
             <div class="header">
-                <div class="header-title">${this.getViewTitle()}</div>
+                <div class="header-title">
+                    ${this.isTranscribing ? html`<span style="color: #FF6B6B; margin-right: 8px; font-weight: bold;">REC</span>` : ''}
+                    ${this.getViewTitle()}
+                </div>
                 <div class="header-actions">
                     ${this.currentView === 'assistant'
                         ? html`
@@ -121,6 +137,10 @@ export class AppHeader extends LitElement {
                               <span>${this.statusText}</span>
                           `
                         : ''}
+
+                    ${this.isTranscribing && this.currentView !== 'transcription' ?
+                        html`<button @click=${this._handleGlobalStopClick} class="button" style="background-color: #FF6B6B; color: white; border-color: #FF6B6B;">Stop REC</button>` : ''}
+
                     ${this.currentView === 'main'
                         ? html`
                               <button class="icon-button" @click=${this.onCustomizeClick}>
@@ -182,6 +202,9 @@ export class AppHeader extends LitElement {
                                       ></path>
                                   </svg>
                               </button>
+                          <button class="icon-button" @click=${this.onTranscriptionViewClick} title="Live Transcription">
+                              <?xml version="1.0" encoding="UTF-8"?><svg width="24px" height="24px" stroke-width="1.7" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" color="currentColor"><path d="M12 4L12 20" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path><path d="M8 9L8 15" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path><path d="M20 10L20 14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path><path d="M4 10L4 14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path><path d="M16 7L16 17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                          </button>
                           `
                         : ''}
                     ${this.currentView === 'assistant'
@@ -211,25 +234,14 @@ export class AppHeader extends LitElement {
                               </button>
                           `
                         : html`
-                              <button @click=${this.onCloseClick} class="icon-button window-close">
-                                  <?xml version="1.0" encoding="UTF-8"?><svg
-                                      width="24px"
-                                      height="24px"
-                                      stroke-width="1.7"
-                                      viewBox="0 0 24 24"
-                                      fill="none"
-                                      xmlns="http://www.w3.org/2000/svg"
-                                      color="currentColor"
-                                  >
-                                      <path
-                                          d="M6.75827 17.2426L12.0009 12M17.2435 6.75736L12.0009 12M12.0009 12L6.75827 6.75736M12.0009 12L17.2435 17.2426"
-                                          stroke="currentColor"
-                                          stroke-width="1.7"
-                                          stroke-linecap="round"
-                                          stroke-linejoin="round"
-                                      ></path>
-                                  </svg>
-                              </button>
+                              ${this.currentView !== 'main' ?
+                                html` <button @click=${this.onCloseClick} class="icon-button window-back" title="Back to Main View">
+                                    <?xml version="1.0" encoding="UTF-8"?><svg width="24px" height="24px" stroke-width="1.7" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" color="currentColor"><path d="M10.5 19.5L3 12M3 12L10.5 4.5M3 12H21" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                                </button>` :
+                                html`<button @click=${this.onCloseClick} class="icon-button window-close" title="Quit Application">
+                                    <?xml version="1.0" encoding="UTF-8"?><svg width="24px" height="24px" stroke-width="1.7" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" color="currentColor"><path d="M6.75827 17.2426L12.0009 12M17.2435 6.75736L12.0009 12M12.0009 12L6.75827 6.75736M12.0009 12L17.2435 17.2426" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                                </button>`
+                              }
                           `}
                 </div>
             </div>
