@@ -108,7 +108,7 @@ export class CheatingDaddyApp extends LitElement {
     constructor() {
         super();
         this.currentView = 'main';
-        this.statusText = '';
+        this.statusText = 'Initializing CheatingDaddy...'; // Set initial status message
         this.startTime = null;
         this.isRecording = false; // This seems related to Gemini session, not local transcription
         this.sessionActive = false; // This seems related to Gemini session

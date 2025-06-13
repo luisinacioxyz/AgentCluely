@@ -128,13 +128,13 @@ export class AppHeader extends LitElement {
             <div class="header">
                 <div class="header-title">
                     ${this.isTranscribing ? html`<span style="color: #FF6B6B; margin-right: 8px; font-weight: bold;">REC</span>` : ''}
-                    ${this.getViewTitle()}
+                    <span>${this.getViewTitle()}</span>
+                    ${this.statusText ? html`<span class="status-message" style="margin-left: 10px; color: var(--description-color); font-size: 0.9em; font-weight: normal;">- ${this.statusText}</span>` : ''}
                 </div>
                 <div class="header-actions">
-                    ${this.currentView === 'assistant'
+                    ${this.currentView === 'assistant' && elapsedTime
                         ? html`
-                              <span>${elapsedTime}</span>
-                              <span>${this.statusText}</span>
+                              <span style="font-size: 13px; color: var(--header-actions-color);">${elapsedTime}</span>
                           `
                         : ''}
 

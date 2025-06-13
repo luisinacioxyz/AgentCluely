@@ -12,6 +12,7 @@ const { spawn } = require('child_process');
 const { pcmToWav, analyzeAudioBuffer, saveDebugAudio } = require('./audioUtils');
 const { getSystemPrompt } = require('./utils/prompts');
 const { whisper } = require('whisper-node'); // Import whisper
+const ffmpegPath = require('ffmpeg-static'); // Add ffmpeg-static
 
 let geminiSession = null;
 let loopbackProc = null;
@@ -413,12 +414,101 @@ ipcMain.handle('export-transcription-txt', async (event, textContent) => {
 });
 
 // Whisper integration
-// Define model path - adjust based on packaging and whisper-node expectations
-const modelsDir = app.isPackaged
+const selectedModel = 'small'; // Changed from 'small.en'
+const whisperModelsDir = app.isPackaged
   ? path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'whisper-node', 'lib', 'whisper.cpp', 'models')
   : path.join(app.getAppPath(), 'node_modules', 'whisper-node', 'lib', 'whisper.cpp', 'models');
-const modelName = 'ggml-base.en.bin'; // Or other model like 'ggml-tiny.en.bin'
-const fullModelPath = path.join(modelsDir, modelName);
+const modelFileName = `ggml-${selectedModel}.bin`; // This will now be 'ggml-small.bin'
+const fullModelPath = path.join(whisperModelsDir, modelFileName);
+
+
+async function ensureWhisperModelExists(modelName = selectedModel) { // Default parameter updated
+    const targetModelFileName = `ggml-${modelName}.bin`; // Use modelName (which defaults to 'small')
+    const targetModelPath = path.join(whisperModelsDir, targetModelFileName);
+    console.log(`Ensuring Whisper model exists at: ${targetModelPath}`);
+
+    if (fsSync.existsSync(targetModelPath)) {
+        console.log(`Model ${targetModelFileName} already exists.`);
+        return true;
+    }
+
+    console.log(`Model ${targetModelFileName} is missing. Attempting to download...`);
+    sendToRenderer('update-status', `Downloading Whisper model (${modelName}), please wait...`); // Use modelName
+
+    // Ensure the models directory itself exists
+    if (!fsSync.existsSync(whisperModelsDir)) {
+        console.log(`Creating models directory: ${whisperModelsDir}`);
+        try {
+            fsSync.mkdirSync(whisperModelsDir, { recursive: true });
+        } catch (mkdirError) {
+            console.error(`Failed to create models directory: ${mkdirError}`);
+            sendToRenderer('update-status', `Error creating model directory. Please check console.`);
+            return false;
+        }
+    }
+
+    // Try to find local whisper-node CLI
+    // Path might need adjustment based on final build structure or if using a global npx fallback
+    let whisperNodeCliPath = path.join(app.getAppPath(), 'node_modules', '.bin', 'whisper-node');
+    if (process.platform === 'win32') {
+        whisperNodeCliPath += '.cmd';
+    }
+
+    if (!fsSync.existsSync(whisperNodeCliPath)) {
+        // Fallback or alternative path for development if getAppPath() is not the project root
+        const devCliPath = path.join(__dirname, '..', 'node_modules', '.bin', 'whisper-node');
+         if (fsSync.existsSync(devCliPath) || fsSync.existsSync(devCliPath + '.cmd')) {
+            whisperNodeCliPath = fsSync.existsSync(devCliPath) ? devCliPath : devCliPath + '.cmd';
+        } else {
+            // If local CLI not found, attempt with npx (less reliable for packaged app)
+            console.warn(`whisper-node CLI not found at ${whisperNodeCliPath} or dev path. Falling back to npx.`);
+             const downloaderProcess = spawn('npx', ['--yes', 'whisper-node', 'download', modelName], { stdio: 'pipe', shell: process.platform === 'win32' }); // Use modelName
+            return await handleDownloadProcess(downloaderProcess, modelName); // Pass modelName
+        }
+    }
+
+    console.log(`Using whisper-node CLI path: ${whisperNodeCliPath}`);
+    const downloaderProcess = spawn(whisperNodeCliPath, ['download', modelName], { stdio: 'pipe' }); // Use modelName
+    return await handleDownloadProcess(downloaderProcess, modelName); // Pass modelName
+}
+
+async function handleDownloadProcess(processToHandle, modelName) { // Parameter renamed for clarity
+    return new Promise((resolve, reject) => {
+        let stdout = '';
+        let stderr = '';
+        processToHandle.stdout.on('data', (data) => {
+            stdout += data.toString();
+            console.log(`Downloader stdout: ${data}`);
+        });
+        processToHandle.stderr.on('data', (data) => {
+            stderr += data.toString();
+            console.error(`Downloader stderr: ${data}`);
+        });
+        processToHandle.on('close', (code) => {
+            if (code === 0) {
+                console.log(`Model ${modelName} downloaded successfully.`);
+                sendToRenderer('update-status', `Whisper model (${modelName}) downloaded successfully.`);
+                resolve(true);
+            } else {
+                console.error(`Failed to download model ${modelName}. Exit code: ${code}, stdout: ${stdout}, stderr: ${stderr}`);
+                sendToRenderer('update-status', `Error downloading Whisper model (${modelName}). Check internet or console for details.`);
+                resolve(false);
+            }
+        });
+        processToHandle.on('error', (err) => {
+            console.error(`Failed to start download process for ${modelName}:`, err);
+            sendToRenderer('update-status', `Failed to start model download (${modelName}). Check internet or console for details.`);
+            resolve(false);
+        });
+    });
+}
+
+
+app.whenReady().then(async () => {
+    // Initial status message is now set in CheatingDaddyApp.js constructor
+    await ensureWhisperModelExists(); // Will default to selectedModel ('small')
+    createWindow();
+});
 
 ipcMain.handle('transcribe-audio', async (event, audioDataUri) => {
     if (!audioDataUri) {
@@ -451,8 +541,8 @@ ipcMain.handle('transcribe-audio', async (event, audioDataUri) => {
             tempOutputPath
         ];
 
-        console.log(`Spawning FFmpeg with args: ${ffmpegArgs.join(' ')}`);
-        const ffmpegProcess = spawn('ffmpeg', ffmpegArgs);
+        console.log(`Spawning FFmpeg with args: ${ffmpegPath} ${ffmpegArgs.join(' ')}`); // Log with ffmpegPath
+        const ffmpegProcess = spawn(ffmpegPath, ffmpegArgs); // Use ffmpegPath
 
         let ffmpegStderr = '';
         ffmpegProcess.stderr.on('data', (data) => {
@@ -476,18 +566,23 @@ ipcMain.handle('transcribe-audio', async (event, audioDataUri) => {
         });
 
         console.log(`Attempting to transcribe using model: ${fullModelPath} with converted file: ${tempOutputPath}`);
+        // Final check for model existence, though ensureWhisperModelExists should handle it.
         if (!fsSync.existsSync(fullModelPath)) {
-            console.error(`Model file not found at: ${fullModelPath}.`);
-            return { success: false, error: `Model file not found: ${modelName}. Please download it.` };
+            console.error(`Model file not found at: ${fullModelPath}. Attempting to download again.`);
+            const downloadSuccess = await ensureWhisperModelExists(selectedModel);
+            if (!downloadSuccess || !fsSync.existsSync(fullModelPath)) {
+                 console.error(`Model still not found after download attempt: ${fullModelPath}.`);
+                 return { success: false, error: `Model '${modelFileName}' missing & download failed. Check internet/console.` }; // Updated message
+            }
         }
 
         const options = {
-            modelName: 'base.en',
-            modelPath: fullModelPath,
+            modelName: selectedModel, // Use the selectedModel variable
+            modelPath: fullModelPath, // This should be correct if modelName in options matches the file stem
             whisperOptions: { language: 'en' }
         };
 
-        const transcriptionResult = await whisper(tempOutputPath, options); // Use FFmpeg output path
+        const transcriptionResult = await whisper(tempOutputPath, options);
         console.log('Transcription result:', transcriptionResult);
 
         // The result format from whisper-node is typically an array of objects
